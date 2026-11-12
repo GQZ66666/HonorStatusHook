@@ -60,6 +60,12 @@ canvas.drawText(percentText, x, height / 2f - (bounds.top + bounds.bottom) / 2f,
 这一帧里拦截 `Paint.getTextBounds`，把返回的垂直包围盒换成完整数字集合的固定包围盒
 （含手动偏移），原绘制代码（包括用于挖空的 Xfermode）完全不动，只让基线变稳定。
 
+### 路径 3：dispatchDraw 里直接绘制
+
+有些 ROM 版本把整块电池（含数字）放在 `HwStatusBarBatteryView.dispatchDraw` 的绘制里，
+单看 View 的 `onDraw` 抓不到。模块在 `dispatchDraw` 期间置一个标记，拦截
+`Canvas.drawText` / `drawTextRun`，只改文字的 y 坐标（不重绘电池外观）。
+
 - 数字集合按当前文本的 Unicode 数字段生成，换语言（阿拉伯-印度数字等）也对得上；
 - 基准只跟“字体 + 字号 + 数字集合”有关，**与当前显示的数字无关**；
 - `Math.round` 消除半像素抖动；

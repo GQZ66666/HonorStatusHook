@@ -37,11 +37,15 @@ public final class CenterHook {
 
     /** 只在 BatteryTintView.onDraw 的 TextPaint.getTextBounds 调用上生效 */
     private static final ThreadLocal<Boolean> IN_BATTERY_TEXT_DRAW = new ThreadLocal<>();
+    /** 在 HwStatusBarBatteryView.dispatchDraw 期间生效，用于拦截 Canvas 文字绘制 */
+    private static final ThreadLocal<Boolean> IN_BATTERY_DISPATCH = new ThreadLocal<>();
 
     private static Context sAppCtx;
     private static volatile boolean sPaintHooked;
+    private static volatile boolean sCanvasHooked;
     private static final AtomicBoolean sFirstDrawLogged = new AtomicBoolean(false);
     private static final AtomicBoolean sFirstBatteryDrawLogged = new AtomicBoolean(false);
+    private static final AtomicBoolean sFirstCanvasTextLogged = new AtomicBoolean(false);
 
     private final Context ctx;
 
@@ -54,9 +58,147 @@ public final class CenterHook {
         boolean helper = hookHelper(cl);
         boolean battery = hookBatteryTintView(cl);
         boolean paint = hookTextBounds();
-        String status = "helper=" + helper + " battery=" + battery + " paint=" + paint;
+        boolean dispatch = hookBatteryDispatch(cl);
+        boolean canvas = hookCanvasText();
+        String status = "helper=" + helper + " battery=" + battery + " paint=" + paint
+                + " dispatch=" + dispatch + " canvas=" + canvas;
         XposedBridge.log(ModuleEntry.TAG + ": hooks " + status);
         Diag.report(ctx, "hooks", status);
+    }
+
+    // ------------------------------------------------------------ 路径 3：dispatchDraw 期间的 Canvas 文字
+
+    private boolean hookBatteryDispatch(ClassLoader cl) {
+        final Class<?> battery = XposedHelpers.findClassIfExists(
+                "com.android.systemui.battery.HwStatusBarBatteryView", cl);
+        if (battery == null) {
+            XposedBridge.log(ModuleEntry.TAG + ": HwStatusBarBatteryView not found (canvas path skipped)");
+            return false;
+        }
+        Method dispatch;
+        try {
+            dispatch = battery.getMethod("dispatchDraw", Canvas.class);
+        } catch (NoSuchMethodException e) {
+            XposedBridge.log(ModuleEntry.TAG + ": dispatchDraw not found");
+            return false;
+        }
+        XposedBridge.hookMethod(dispatch, new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (battery.isInstance(param.thisObject)) {
+                    IN_BATTERY_DISPATCH.set(Boolean.TRUE);
+                }
+            }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                IN_BATTERY_DISPATCH.remove();
+            }
+        });
+        XposedBridge.log(ModuleEntry.TAG + ": hooked HwStatusBarBatteryView.dispatchDraw");
+        return true;
+    }
+
+    private static synchronized boolean hookCanvasText() {
+        if (sCanvasHooked) {
+            return true;
+        }
+        try {
+            XposedHelpers.findAndHookMethod(Canvas.class, "drawText",
+                    String.class, float.class, float.class, Paint.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            adjustCanvasText(param, (String) param.args[0], 2, 3);
+                        }
+                    });
+            try {
+                XposedHelpers.findAndHookMethod(Canvas.class, "drawTextRun",
+                        char[].class, int.class, int.class, int.class, int.class,
+                        float.class, float.class, boolean.class, Paint.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                char[] chars = (char[]) param.args[0];
+                                int index = (Integer) param.args[1];
+                                int count = (Integer) param.args[2];
+                                String text = new String(chars, index, count);
+                                adjustCanvasText(param, text, 6, 8);
+                            }
+                        });
+            } catch (Throwable ignored) {
+            }
+            try {
+                XposedHelpers.findAndHookMethod(Canvas.class, "drawTextRun",
+                        CharSequence.class, int.class, int.class, int.class, int.class,
+                        float.class, float.class, boolean.class, Paint.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                CharSequence cs = (CharSequence) param.args[0];
+                                int index = (Integer) param.args[1];
+                                int count = (Integer) param.args[2];
+                                String text = cs.subSequence(index, index + count).toString();
+                                adjustCanvasText(param, text, 6, 8);
+                            }
+                        });
+            } catch (Throwable ignored) {
+            }
+            sCanvasHooked = true;
+            XposedBridge.log(ModuleEntry.TAG + ": hooked Canvas drawText/drawTextRun");
+        } catch (Throwable t) {
+            XposedBridge.log(ModuleEntry.TAG + ": Canvas text hook failed: " + t);
+        }
+        return sCanvasHooked;
+    }
+
+    private static void adjustCanvasText(XC_MethodHook.MethodHookParam param, String text,
+                                         int yIndex, int paintIndex) {
+        if (!Boolean.TRUE.equals(IN_BATTERY_DISPATCH.get()) || text == null || sAppCtx == null) {
+            return;
+        }
+        if (!containsDigit(text) || param.args.length <= Math.max(yIndex, paintIndex)) {
+            return;
+        }
+        Object paintObj = param.args[paintIndex];
+        if (!(paintObj instanceof Paint)) {
+            return;
+        }
+        Paint paint = (Paint) paintObj;
+        Config cfg = PrefsClient.get(sAppCtx);
+        if (!cfg.enabled) {
+            return;
+        }
+        try {
+            Rect cur = new Rect();
+            paint.getTextBounds(text, 0, text.length(), cur);
+            String ref = CenterMath.referenceDigits(text);
+            Rect fixed = new Rect();
+            paint.getTextBounds(ref, 0, ref.length(), fixed);
+
+            float offsetPx = cfg.offsetDp * sAppCtx.getResources().getDisplayMetrics().density;
+            float delta = (cur.top + cur.bottom) / 2f - (fixed.top + fixed.bottom) / 2f + offsetPx;
+            float y = (Float) param.args[yIndex];
+            param.args[yIndex] = y + delta;
+
+            if (sFirstCanvasTextLogged.compareAndSet(false, true)) {
+                XposedBridge.log(ModuleEntry.TAG + ": [canvastext] text=" + text
+                        + " delta=" + delta + " y=" + y);
+                Diag.report(sAppCtx, "canvastext", "text=" + text
+                        + " delta=" + Math.round(delta));
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(t);
+        }
+    }
+
+    private static boolean containsDigit(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isDigit(s.charAt(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------ 路径 1：TextView helper
