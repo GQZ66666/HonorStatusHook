@@ -35,5 +35,17 @@
     <string name="cancel">取消</string>
     <string name="restart_running">正在重启系统界面…</string>
 
+    <string name="section_test">模拟电量（免 adb）</string>
+    <string name="test_level">当前要模拟的电量：%1$d%%</string>
+    <string name="btn_apply_level">应用这个电量</string>
+    <string name="btn_charging">模拟充电</string>
+    <string name="btn_unplug">模拟不充电</string>
+    <string name="btn_reset_battery">恢复真实电量</string>
+    <string name="test_hint">需要 root。模拟只改变系统上报的电量/充电状态，不会真的充放电；测完点「恢复真实电量」。</string>
+
+    <string name="section_diag">模块状态（诊断）</string>
+    <string name="diag_empty">还没有收到注入回调。先点「重启系统界面」，再回来刷新。</string>
+    <string name="btn_refresh_diag">刷新状态</string>
+
     <string name="about">本模块只修改状态栏电池百分比的绘制基线：不修改系统文件、不申请网络权限、不收集任何数据。若系统更新后类名变化，模块会静默跳过，不会影响正常显示。</string>
 </resources>

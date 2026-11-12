@@ -51,14 +51,17 @@ public final class CenterHook {
     }
 
     public void install(ClassLoader cl) {
-        hookHelper(cl);
-        hookBatteryTintView(cl);
-        hookTextBounds();
+        boolean helper = hookHelper(cl);
+        boolean battery = hookBatteryTintView(cl);
+        boolean paint = hookTextBounds();
+        String status = "helper=" + helper + " battery=" + battery + " paint=" + paint;
+        XposedBridge.log(ModuleEntry.TAG + ": hooks " + status);
+        Diag.report(ctx, "hooks", status);
     }
 
     // ------------------------------------------------------------ 路径 1：TextView helper
 
-    private void hookHelper(ClassLoader cl) {
+    private boolean hookHelper(ClassLoader cl) {
         for (String name : HELPER_CANDIDATES) {
             Class<?> clazz = XposedHelpers.findClassIfExists(name, cl);
             if (clazz == null) {
@@ -84,10 +87,11 @@ public final class CenterHook {
             }
             if (hooked > 0) {
                 XposedBridge.log(ModuleEntry.TAG + ": hooked " + name + " x" + hooked);
-                return;
+                return true;
             }
         }
         XposedBridge.log(ModuleEntry.TAG + ": VerticalCenteredTextHelper not found (path 1 skipped)");
+        return false;
     }
 
     private static boolean matchesHelper(Method m) {
@@ -174,24 +178,25 @@ public final class CenterHook {
                     + " baseline=" + baseline + " refTop=" + bounds.top
                     + " refBottom=" + bounds.bottom + " text=" + text
                     + " offsetDp=" + cfg.offsetDp + " dy=" + rounded);
+            Diag.report(ctx, "textview", "text=" + text + " dy=" + rounded);
         }
         return rounded;
     }
 
     // ------------------------------------------------------------ 路径 2：BatteryTintView 自绘
 
-    private void hookBatteryTintView(ClassLoader cl) {
+    private boolean hookBatteryTintView(ClassLoader cl) {
         Class<?> clazz = XposedHelpers.findClassIfExists(BATTERY_TINT_VIEW, cl);
         if (clazz == null) {
             XposedBridge.log(ModuleEntry.TAG + ": BatteryTintView not found (path 2 skipped)");
-            return;
+            return false;
         }
         Method onDraw;
         try {
             onDraw = clazz.getDeclaredMethod("onDraw", Canvas.class);
         } catch (NoSuchMethodException e) {
             XposedBridge.log(ModuleEntry.TAG + ": BatteryTintView.onDraw not found");
-            return;
+            return false;
         }
         XposedBridge.hookMethod(onDraw, new XC_MethodHook() {
             @Override
@@ -212,15 +217,16 @@ public final class CenterHook {
             }
         });
         XposedBridge.log(ModuleEntry.TAG + ": hooked " + BATTERY_TINT_VIEW + ".onDraw");
+        return true;
     }
 
     /**
      * 全局 hook Paint.getTextBounds(String,...)：只在 BatteryTintView.onDraw 这一帧里、
      * 且只对第一次调用生效，把垂直包围盒换成完整数字集合的固定包围盒。
      */
-    private static synchronized void hookTextBounds() {
+    private static synchronized boolean hookTextBounds() {
         if (sPaintHooked) {
-            return;
+            return true;
         }
         try {
             XposedHelpers.findAndHookMethod(Paint.class, "getTextBounds",
@@ -258,6 +264,8 @@ public final class CenterHook {
                                     XposedBridge.log(ModuleEntry.TAG + ": [batteryview] text=" + text
                                             + " refTop=" + fixed.top + " refBottom=" + fixed.bottom
                                             + " offsetDp=" + cfg.offsetDp);
+                                    Diag.report(sAppCtx, "battery", "text=" + text
+                                            + " top=" + fixed.top + " bottom=" + fixed.bottom);
                                 }
                             } catch (Throwable t) {
                                 XposedBridge.log(t);
@@ -269,6 +277,7 @@ public final class CenterHook {
         } catch (Throwable t) {
             XposedBridge.log(ModuleEntry.TAG + ": Paint.getTextBounds hook failed: " + t);
         }
+        return sPaintHooked;
     }
 
     // ------------------------------------------------------------ utils

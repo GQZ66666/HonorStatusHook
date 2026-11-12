@@ -23,23 +23,47 @@ super.onDraw(canvas);
 
 ## 2. 本模块怎么修
 
-挂钩同一个方法，但换成**固定基准**：
+状态栏电池百分比其实有**两条绘制路径**，模块都接管了：
+
+### 路径 1：充电 / 胶囊态（TextView）
+
+`CenteredTextView.onDraw` → `VerticalCenteredTextHelper.optimizeDraw()`，原逻辑：
 
 ```java
-String ref = 当前语言/字体的完整数字集合 "0123456789";      // 或 ٠١٢… / ०१२…
-paint.getTextBounds(ref, 0, ref.length(), bounds);
+paint.getTextBounds(currentText, 0, len, bounds);
 float dy = height / 2f - getBaseline()
-         - (bounds.top + bounds.bottom) / 2f
-         + 手动偏移;                                        // dp
-dy = Math.round(dy);                                        // 整像素对齐
+         - (bounds.top + bounds.bottom) / 2f;      // 随数字变化
 canvas.translate(0f, dy);
 ```
 
+模块替换为：
+
+```java
+String ref = 当前语言/字体的完整数字集合 "0123456789";
+paint.getTextBounds(ref, 0, ref.length(), bounds);
+float dy = height / 2f - getBaseline()
+         - (bounds.top + bounds.bottom) / 2f
+         + 手动偏移;                                   // dp
+dy = Math.round(dy);
+```
+
+### 路径 2：非充电态（BatteryTintView 自绘）
+
+非充电时数字**不是 TextView 画的**，而是 `BatteryTintView.onDraw` 里直接：
+
+```java
+paint.getTextBounds(percentText, 0, len, bounds);
+canvas.drawText(percentText, x, height / 2f - (bounds.top + bounds.bottom) / 2f, paint);
+```
+
+所以只 hook 路径 1 会出现“只有充电时生效”。模块的做法是：在 `BatteryTintView.onDraw`
+这一帧里拦截 `Paint.getTextBounds`，把返回的垂直包围盒换成完整数字集合的固定包围盒
+（含手动偏移），原绘制代码（包括用于挖空的 Xfermode）完全不动，只让基线变稳定。
+
 - 数字集合按当前文本的 Unicode 数字段生成，换语言（阿拉伯-印度数字等）也对得上；
-- 基准只跟"字体 + 字号 + 数字集合"有关，**与当前显示的数字无关**，所以 8 / 18 / 80 / 100
-  共用同一条基线；
+- 基准只跟“字体 + 字号 + 数字集合”有关，**与当前显示的数字无关**；
 - `Math.round` 消除半像素抖动；
-- 关闭开关时**完全复刻原逻辑**，保证"关掉 = 和系统一模一样"。
+- 关闭开关时两条路径都**完全复刻原逻辑**，保证“关掉 = 和系统一模一样”。
 
 ## 3. 构建
 
@@ -87,6 +111,8 @@ gradle wrapper --gradle-version 8.7 && ./gradlew :app:assembleDebug
 | 手动微调 | -3.0dp ~ +3.0dp，0.1dp 步进；负数向上、正数向下；「归零」恢复 0 |
 | 预览字体 | 系统默认 / 等宽 / 衬线 / 粗体 / HnChinese（本机），用来确认不同字体下都对齐 |
 | 预览 | 8 / 18 / 80 / 100 四组不同位数 + 大号 88 / 100，虚线是胶囊中线 |
+| **模拟电量** | 滑杆选 0~100 →「应用这个电量」；「模拟充电 / 模拟不充电」直接改系统上报状态；「恢复真实电量」还原。需要 root，免去每次 adb 敲 `dumpsys battery` |
+| **模块状态** | 显示系统界面回传的注入结果：`注入`（三条 hook 是否装上）、`TextView 路径`、`BatteryTintView 路径`、`Paint 拦截`。用于确认某条绘制路径到底有没有被触发 |
 
 手动偏移的用途：不同 ROM 的电池图标基线略有差异，或你个人更喜欢偏上/偏下 0.5dp 的观感。
 它只作用于模块的绘制平移，不改系统布局。

@@ -17,6 +17,9 @@ public final class PrefsProvider extends ContentProvider {
 
     public static final String AUTHORITY = Prefs.PKG + ".prefs";
     public static final String METHOD_CONFIG = "config";
+    public static final String METHOD_REPORT = "report";
+    public static final String METHOD_DIAG = "diag";
+    public static final String DIAG_FILE = "diag";
 
     @Override
     public boolean onCreate() {
@@ -25,14 +28,54 @@ public final class PrefsProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
-        if (!METHOD_CONFIG.equals(method) || !isTrustedCaller()) {
+        if (!isTrustedCaller()) {
             return null;
         }
         Context ctx = getContext();
         if (ctx == null) {
             return null;
         }
-        return Prefs.load(ctx).toBundle();
+        if (METHOD_CONFIG.equals(method)) {
+            return Prefs.load(ctx).toBundle();
+        }
+        if (METHOD_REPORT.equals(method)) {
+            storeReport(ctx, extras);
+            return null;
+        }
+        if (METHOD_DIAG.equals(method)) {
+            return loadDiag(ctx);
+        }
+        return null;
+    }
+
+    private static void storeReport(Context ctx, Bundle extras) {
+        if (extras == null) {
+            return;
+        }
+        String time = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(new java.util.Date());
+        android.content.SharedPreferences.Editor e = ctx
+                .getSharedPreferences(DIAG_FILE, Context.MODE_PRIVATE).edit();
+        for (String key : extras.keySet()) {
+            Object value = extras.get(key);
+            if (value != null) {
+                e.putString(key, value + "  @" + time);
+            }
+        }
+        e.apply();
+    }
+
+    private static Bundle loadDiag(Context ctx) {
+        Bundle b = new Bundle();
+        android.content.SharedPreferences sp =
+                ctx.getSharedPreferences(DIAG_FILE, Context.MODE_PRIVATE);
+        for (java.util.Map.Entry<String, ?> entry : sp.getAll().entrySet()) {
+            Object v = entry.getValue();
+            if (v instanceof String) {
+                b.putString(entry.getKey(), (String) v);
+            }
+        }
+        return b;
     }
 
     private boolean isTrustedCaller() {
