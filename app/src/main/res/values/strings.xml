@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">电池百分比居中</string>
+    <string name="xposed_description">修复状态栏电池百分比数字上下不居中：固定数字集合基准 + 整像素对齐，支持手动微调。</string>
+
+    <string name="title">电池百分比居中</string>
+    <string name="subtitle">让任何字体、任何数字组合都共用同一条视觉中线</string>
+
+    <string name="section_fix">修复</string>
+    <string name="switch_enable">启用居中修复</string>
+    <string name="fix_desc">系统原本用「当前这串数字」的墨迹包围盒来算垂直偏移，所以换个数字就可能上下跳 1px。本模块改为测量同一字体的完整数字集合（0–9）取固定基准，并把偏移取整到像素；字体、字号、语言数字形态变了会自动重新取基准。</string>
+
+    <string name="section_offset">手动微调</string>
+    <string name="offset_value">%1$+.1f dp</string>
+    <string name="offset_hint">负数向上、正数向下，步进 0.1dp；只影响本模块绘制，不改系统布局。</string>
+    <string name="btn_reset">归零</string>
+
+    <string name="section_preview">预览</string>
+    <string name="btn_font">预览字体：%1$s</string>
+    <string name="font_system">系统默认</string>
+    <string name="font_mono">等宽</string>
+    <string name="font_serif">衬线</string>
+    <string name="font_bold">粗体</string>
+    <string name="font_hn">HnChinese（本机）</string>
+    <string name="preview_hint">上面四组是 8 / 18 / 80 / 100（1~3 位），下面是大号 88 / 100；切换字体观察它们是否都围绕胶囊中线对齐。</string>
+
+    <string name="btn_save">保存并应用</string>
+    <string name="btn_restart">重启系统界面</string>
+    <string name="saved">已保存，重启系统界面后生效</string>
+    <string name="hint_body">在 LSPosed 中启用本模块，作用域勾选「系统界面」（当前检测到：%1$s），然后重启系统界面。\n\n临时 root 重启手机后失效：重新 root 后需再点一次「重启系统界面」，模块才会重新注入。</string>
+
+    <string name="restart_title">重启系统界面</string>
+    <string name="restart_msg">将通过 root 结束系统界面进程，状态栏会短暂消失后自动恢复。是否继续？</string>
+    <string name="restart_ok">继续</string>
+    <string name="cancel">取消</string>
+    <string name="restart_running">正在重启系统界面…</string>
+
+    <string name="about">本模块只修改状态栏电池百分比的绘制基线：不修改系统文件、不申请网络权限、不收集任何数据。若系统更新后类名变化，模块会静默跳过，不会影响正常显示。</string>
+</resources>

@@ -1,0 +1,4 @@
+-keep class com.harmony.batteryfix.ModuleEntry { *; }
+-keep class com.harmony.batteryfix.CenterHook { *; }
+-keep class com.harmony.batteryfix.PrefsProvider { *; }
+-dontwarn de.robv.android.xposed.**
