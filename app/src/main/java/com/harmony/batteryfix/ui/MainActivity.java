@@ -179,6 +179,7 @@ public final class MainActivity extends Activity {
                 appendDiag(sb, b, "textview", "TextView 路径");
                 appendDiag(sb, b, "battery", "BatteryTintView 路径");
                 appendDiag(sb, b, "paint", "Paint 拦截");
+                appendDiag(sb, b, "dispatch", "电池 dispatch");
                 appendDiag(sb, b, "canvastext", "Canvas 文字");
             }
         } catch (Throwable ignored) {

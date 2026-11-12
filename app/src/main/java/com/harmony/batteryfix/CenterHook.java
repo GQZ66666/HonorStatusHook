@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.text.TextPaint;
+import android.view.View;
 import android.widget.TextView;
 
 import java.lang.reflect.Method;
@@ -46,6 +47,7 @@ public final class CenterHook {
     private static final AtomicBoolean sFirstDrawLogged = new AtomicBoolean(false);
     private static final AtomicBoolean sFirstBatteryDrawLogged = new AtomicBoolean(false);
     private static final AtomicBoolean sFirstCanvasTextLogged = new AtomicBoolean(false);
+    private static final AtomicBoolean sFirstDispatchLogged = new AtomicBoolean(false);
 
     private final Context ctx;
 
@@ -75,27 +77,55 @@ public final class CenterHook {
             XposedBridge.log(ModuleEntry.TAG + ": HwStatusBarBatteryView not found (canvas path skipped)");
             return false;
         }
-        Method dispatch;
-        try {
-            dispatch = battery.getMethod("dispatchDraw", Canvas.class);
-        } catch (NoSuchMethodException e) {
+        Method dispatch = null;
+        for (Class<?> c = battery; c != null && dispatch == null; c = c.getSuperclass()) {
+            try {
+                dispatch = c.getDeclaredMethod("dispatchDraw", Canvas.class);
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        if (dispatch == null) {
             XposedBridge.log(ModuleEntry.TAG + ": dispatchDraw not found");
             return false;
         }
+        dispatch.setAccessible(true);
         XposedBridge.hookMethod(dispatch, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (battery.isInstance(param.thisObject)) {
-                    IN_BATTERY_DISPATCH.set(Boolean.TRUE);
+                if (!battery.isInstance(param.thisObject)) {
+                    return;
+                }
+                IN_BATTERY_DISPATCH.set(Boolean.TRUE);
+                if (sFirstDispatchLogged.compareAndSet(false, true)) {
+                    StringBuilder sb = new StringBuilder();
+                    try {
+                        View v = (View) param.thisObject;
+                        if (v instanceof android.view.ViewGroup) {
+                            android.view.ViewGroup g = (android.view.ViewGroup) v;
+                            for (int i = 0; i < g.getChildCount(); i++) {
+                                View child = g.getChildAt(i);
+                                sb.append(child.getClass().getSimpleName())
+                                        .append(':').append(child.getVisibility()).append(' ');
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    String info = "fired children=" + sb;
+                    XposedBridge.log(ModuleEntry.TAG + ": [dispatch] " + info
+                            + " w=" + ((View) param.thisObject).getWidth()
+                            + " h=" + ((View) param.thisObject).getHeight());
+                    Diag.report(sAppCtx, "dispatch", info);
                 }
             }
 
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
-                IN_BATTERY_DISPATCH.remove();
+                if (battery.isInstance(param.thisObject)) {
+                    IN_BATTERY_DISPATCH.remove();
+                }
             }
         });
-        XposedBridge.log(ModuleEntry.TAG + ": hooked HwStatusBarBatteryView.dispatchDraw");
+        XposedBridge.log(ModuleEntry.TAG + ": hooked HwStatusBarBatteryView.dispatchDraw (" + dispatch + ")");
         return true;
     }
 
