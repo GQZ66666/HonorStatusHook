@@ -62,10 +62,67 @@ public final class CenterHook {
         boolean paint = hookTextBounds();
         boolean dispatch = hookBatteryDispatch(cl);
         boolean canvas = hookCanvasText();
+        boolean tree = hookTree(cl);
         String status = "helper=" + helper + " battery=" + battery + " paint=" + paint
-                + " dispatch=" + dispatch + " canvas=" + canvas;
+                + " dispatch=" + dispatch + " canvas=" + canvas + " tree=" + tree;
         XposedBridge.log(ModuleEntry.TAG + ": hooks " + status);
         Diag.report(ctx, "hooks", status);
+    }
+
+    private boolean hookTree(ClassLoader cl) {
+        String[] roots = {
+                "com.android.systemui.statusbar.phone.PhoneStatusBarView",
+                "com.android.systemui.statusbar.phone.HwPhoneStatusBarView"
+        };
+        for (String name : roots) {
+            Class<?> c = XposedHelpers.findClassIfExists(name, cl);
+            if (c == null) {
+                continue;
+            }
+            XposedBridge.hookAllMethods(c, "onAttachedToWindow", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        StringBuilder sb = new StringBuilder();
+                        walk((View) param.thisObject, sb, 0);
+                        Diag.report(sAppCtx, "tree", sb.toString());
+                    } catch (Throwable t) {
+                        XposedBridge.log(t);
+                    }
+                }
+            });
+            XposedBridge.log(ModuleEntry.TAG + ": hooked tree root " + name);
+            return true;
+        }
+        return false;
+    }
+
+    private static void walk(View v, StringBuilder sb, int depth) {
+        if (sb.length() > 700 || depth > 8) {
+            return;
+        }
+        String cls = v.getClass().getSimpleName();
+        String id = "";
+        try {
+            if (v.getId() != View.NO_ID) {
+                id = v.getResources().getResourceEntryName(v.getId());
+            }
+        } catch (Throwable ignored) {
+        }
+        sb.append(cls);
+        if (!id.isEmpty()) {
+            sb.append('#').append(id);
+        }
+        if (v.getVisibility() != View.VISIBLE) {
+            sb.append('(').append(v.getVisibility()).append(')');
+        }
+        sb.append(' ');
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                walk(g.getChildAt(i), sb, depth + 1);
+            }
+        }
     }
 
     // ------------------------------------------------------------ 路径 3：dispatchDraw 期间的 Canvas 文字
@@ -184,10 +241,10 @@ public final class CenterHook {
 
     private static void adjustCanvasText(XC_MethodHook.MethodHookParam param, String text,
                                          int yIndex, int paintIndex) {
-        if (!Boolean.TRUE.equals(IN_BATTERY_DISPATCH.get()) || text == null || sAppCtx == null) {
+        if (text == null || sAppCtx == null) {
             return;
         }
-        if (!containsDigit(text) || param.args.length <= Math.max(yIndex, paintIndex)) {
+        if (param.args.length <= Math.max(yIndex, paintIndex)) {
             return;
         }
         Object paintObj = param.args[paintIndex];
@@ -195,6 +252,10 @@ public final class CenterHook {
             return;
         }
         Paint paint = (Paint) paintObj;
+        float y = (Float) param.args[yIndex];
+        if (!looksLikeBatteryPercent(text, y, paint)) {
+            return;
+        }
         Config cfg = PrefsClient.get(sAppCtx);
         if (!cfg.enabled) {
             return;
@@ -208,7 +269,6 @@ public final class CenterHook {
 
             float offsetPx = cfg.offsetDp * sAppCtx.getResources().getDisplayMetrics().density;
             float delta = (cur.top + cur.bottom) / 2f - (fixed.top + fixed.bottom) / 2f + offsetPx;
-            float y = (Float) param.args[yIndex];
             param.args[yIndex] = y + delta;
 
             if (sFirstCanvasTextLogged.compareAndSet(false, true)) {
@@ -220,6 +280,33 @@ public final class CenterHook {
         } catch (Throwable t) {
             XposedBridge.log(t);
         }
+    }
+
+    private static volatile int sStatusBarHeight;
+
+    private static boolean looksLikeBatteryPercent(String text, float y, Paint paint) {
+        if (text.isEmpty() || text.length() > 3) {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            if (!Character.isDigit(text.charAt(i))) {
+                return false;
+            }
+        }
+        float size = paint.getTextSize();
+        if (size < 8f || size > 90f) {
+            return false;
+        }
+        if (sStatusBarHeight == 0) {
+            try {
+                int id = sAppCtx.getResources().getIdentifier(
+                        "status_bar_height", "dimen", "android");
+                sStatusBarHeight = id > 0 ? sAppCtx.getResources().getDimensionPixelSize(id) : 96;
+            } catch (Throwable t) {
+                sStatusBarHeight = 96;
+            }
+        }
+        return y > -sStatusBarHeight && y < sStatusBarHeight * 2.5f;
     }
 
     private static boolean containsDigit(String s) {
