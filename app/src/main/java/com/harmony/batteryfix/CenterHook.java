@@ -3,7 +3,10 @@ package com.harmony.batteryfix;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.text.TextPaint;
 import android.view.View;
 import android.widget.TextView;
@@ -69,8 +72,140 @@ public final class CenterHook {
         Diag.report(ctx, "hooks", status);
     }
 
-    private boolean hookTree(ClassLoader cl) {
-        String[] roots = {
+    /**
+     * 按 Honor 原始几何（104×60）1:1 克隆电池，只把百分比数字换成我们画的。
+     * 返回 true 表示已接管绘制（跳过系统绘制）。
+     */
+    private static boolean drawBattery(XC_MethodHook.MethodHookParam param, View view) {
+        Object[] args = param.args;
+        Canvas canvas = args.length > 0 && args[0] instanceof Canvas ? (Canvas) args[0] : null;
+        if (canvas == null || sAppCtx == null) {
+            return false;
+        }
+        Config cfg = PrefsClient.get(sAppCtx);
+        if (!cfg.enabled) {
+            return false;
+        }
+        Object obj = param.thisObject;
+        int level = getInt(obj, "mLevel");
+        if (level < 0 || level > 100) {
+            return false;
+        }
+        boolean charging = getBool(obj, "mIsCharging");
+        boolean show = getBool(obj, "mIsShowPercent");
+        boolean inside = getBool(obj, "mIsShowPercentIn");
+        if (!inside) {
+            // 百分比在图标外时，交回系统绘制，避免丢掉外侧文字
+            return false;
+        }
+        int tint = getInt(obj, "mTintColor");
+        if (tint == 0) {
+            tint = 0xFFFFFFFF;
+        }
+
+        int w = view.getWidth();
+        int h = view.getHeight();
+        if (w <= 0 || h <= 0) {
+            return false;
+        }
+
+        param.setResult(null);
+
+        float s = Math.min(w / 104f, h / 60f);
+        float ox = (w - 104f * s) / 2f;
+        float oy = (h - 60f * s) / 2f;
+
+        RectF body = new RectF(ox + 10f * s, oy + 8f * s, ox + 89f * s, oy + 52f * s);
+        float radius = 22f * s;
+
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStrokeJoin(Paint.Join.ROUND);
+        p.setStrokeCap(Paint.Cap.ROUND);
+
+        int outline = tint | 0xFF000000;
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(Math.max(1f, 1.6f * s));
+        p.setColor(outline);
+        canvas.drawRoundRect(body, radius, radius, p);
+
+        RectF nub = new RectF(ox + 92f * s, oy + 22f * s, ox + 98f * s, oy + 38f * s);
+        canvas.drawRoundRect(nub, 3f * s, 3f * s, p);
+
+        int fill = charging ? 0xFF34C759 : (level <= 20 ? 0xFFFF9F0A : outline);
+        float inset = 2.4f * s;
+        float fillW = (body.width() - 2f * inset) * level / 100f;
+        if (fillW > 0.5f) {
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(fill);
+            RectF fr = new RectF(body.left + inset, body.top + inset,
+                    body.left + inset + fillW, body.bottom - inset);
+            float frr = Math.min((body.height() - 2f * inset) / 2f, Math.max(1f, fillW / 2f));
+            canvas.drawRoundRect(fr, frr, frr, p);
+        }
+
+        int textColor = luminance(fill) > 0.6 ? 0xFF000000 : 0xFFFFFFFF;
+        if (charging && !show) {
+            drawBolt(canvas, body.centerX(), body.centerY(), s, textColor, p);
+        }
+        if (show) {
+            float size = Math.max(6f, body.height() * 0.60f);
+            drawPercent(canvas, level, body.centerX(), body.centerY(), size, textColor, cfg);
+        }
+
+        if (sFirstBatteryDrawLogged.compareAndSet(false, true)) {
+            Diag.report(sAppCtx, "custombattery", "level=" + level + " charging=" + charging);
+        }
+        return true;
+    }
+
+    private static void drawPercent(Canvas c, int level, float cx, float cy,
+                                    float size, int color, Config cfg) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(color);
+        p.setTextSize(size);
+        p.setTextAlign(Paint.Align.CENTER);
+        p.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        String text = String.valueOf(level);
+        String ref = CenterMath.referenceDigits(text);
+        Rect r = new Rect();
+        p.getTextBounds(ref, 0, ref.length(), r);
+        float offset = cfg.offsetDp * sAppCtx.getResources().getDisplayMetrics().density;
+        float baseline = cy - (r.top + r.bottom) / 2f + offset;
+        c.drawText(text, cx, baseline, p);
+    }
+
+    private static void drawBolt(Canvas c, float cx, float cy, float s, int color, Paint p) {
+        Path path = new Path();
+        path.moveTo(cx + 2.0f * s, cy - 7.0f * s);
+        path.lineTo(cx - 3.5f * s, cy + 0.8f * s);
+        path.lineTo(cx - 0.5f * s, cy + 0.8f * s);
+        path.lineTo(cx - 2.0f * s, cy + 7.0f * s);
+        path.lineTo(cx + 3.5f * s, cy - 0.8f * s);
+        path.lineTo(cx + 0.5f * s, cy - 0.8f * s);
+        path.close();
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(color);
+        c.drawPath(path, p);
+    }
+
+    private static int luminance(int color) {
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = color & 0xFF;
+        return (r * 299 + g * 587 + b * 114) / 1000;
+    }
+
+    private static int getInt(Object obj, String name) {
+        Object v = field(obj, name);
+        return v instanceof Integer ? (Integer) v : 0;
+    }
+
+    private static boolean getBool(Object obj, String name) {
+        Object v = field(obj, name);
+        return v instanceof Boolean && (Boolean) v;
+    }
+
+    private boolean hookTree(ClassLoader cl) {        String[] roots = {
                 "com.android.systemui.statusbar.phone.PhoneStatusBarView",
                 "com.android.systemui.statusbar.phone.HwPhoneStatusBarView"
         };
@@ -172,6 +307,11 @@ public final class CenterHook {
                             + " w=" + ((View) param.thisObject).getWidth()
                             + " h=" + ((View) param.thisObject).getHeight());
                     Diag.report(sAppCtx, "dispatch", info);
+                }
+                try {
+                    drawBattery(param, (View) param.thisObject);
+                } catch (Throwable t) {
+                    XposedBridge.log(t);
                 }
             }
 
