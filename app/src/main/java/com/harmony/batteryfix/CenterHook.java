@@ -2,8 +2,10 @@ package com.harmony.batteryfix;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Rect;
 import android.text.TextPaint;
+import android.widget.TextView;
 
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -14,37 +16,57 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
 /**
- * 接管 VerticalCenteredTextHelper.optimizeDraw()。
+ * 状态栏电池百分比有两条绘制路径，这里全部接管：
  *
- * <p>原实现：{@code dy = h/2 - baseline - (currentText.top + currentText.bottom)/2}，
- * currentText 决定偏移，数字一变就可能上下跳 1px。</p>
+ * <p><b>路径 1（充电/胶囊态）</b>：{@code CenteredTextView.onDraw} 委托
+ * {@code VerticalCenteredTextHelper.optimizeDraw}，原公式用“当前数字”的包围盒算垂直偏移。
+ * 我们替换为“完整数字集合”的固定基准 + 整像素对齐 + 手动偏移。</p>
  *
- * <p>本实现：{@code dy = h/2 - baseline - (refDigits.top + refDigits.bottom)/2 + offset}，
- * refDigits 是同一字体的完整数字集合，再四舍五入到整数像素。所有数字共用同一条基线。</p>
+ * <p><b>路径 2（非充电态）</b>：数字由 {@code BatteryTintView.onDraw} 直接
+ * {@code Canvas.drawText} 画出，同样用当前数字的包围盒算基线，且完全不经过上面的 helper。
+ * 我们的做法是在这帧 onDraw 期间拦截 {@code Paint.getTextBounds}，把返回的垂直包围盒
+ * 换成“完整数字集合”的固定包围盒（含手动偏移），从而让原绘制代码算出稳定的基线。</p>
  */
 public final class CenterHook {
 
-    private static final String[] CANDIDATES = {
+    private static final String[] HELPER_CANDIDATES = {
             "com.android.systemui.view.VerticalCenteredTextHelper",
             "com.hihonor.systemui.view.VerticalCenteredTextHelper"
     };
+    private static final String BATTERY_TINT_VIEW = "com.android.systemui.tint.BatteryTintView";
+
+    /** 只在 BatteryTintView.onDraw 的 TextPaint.getTextBounds 调用上生效 */
+    private static final ThreadLocal<Boolean> IN_BATTERY_TEXT_DRAW = new ThreadLocal<>();
+
+    private static Context sAppCtx;
+    private static volatile boolean sPaintHooked;
+    private static final AtomicBoolean sFirstDrawLogged = new AtomicBoolean(false);
+    private static final AtomicBoolean sFirstBatteryDrawLogged = new AtomicBoolean(false);
 
     private final Context ctx;
-    private static final AtomicBoolean sFirstDrawLogged = new AtomicBoolean(false);
 
     public CenterHook(Context ctx) {
         this.ctx = ctx;
+        sAppCtx = ctx.getApplicationContext();
     }
 
     public void install(ClassLoader cl) {
-        for (String name : CANDIDATES) {
+        hookHelper(cl);
+        hookBatteryTintView(cl);
+        hookTextBounds();
+    }
+
+    // ------------------------------------------------------------ 路径 1：TextView helper
+
+    private void hookHelper(ClassLoader cl) {
+        for (String name : HELPER_CANDIDATES) {
             Class<?> clazz = XposedHelpers.findClassIfExists(name, cl);
             if (clazz == null) {
                 continue;
             }
             int hooked = 0;
             for (Method m : clazz.getDeclaredMethods()) {
-                if (!"optimizeDraw".equals(m.getName()) || !matches(m)) {
+                if (!"optimizeDraw".equals(m.getName()) || !matchesHelper(m)) {
                     continue;
                 }
                 XposedBridge.hookMethod(m, new XC_MethodReplacement() {
@@ -65,13 +87,10 @@ public final class CenterHook {
                 return;
             }
         }
-        XposedBridge.log(ModuleEntry.TAG + ": VerticalCenteredTextHelper not found, no-op");
+        XposedBridge.log(ModuleEntry.TAG + ": VerticalCenteredTextHelper not found (path 1 skipped)");
     }
 
-    /**
-     * 只挂签名完全匹配的方法，避免不同 ROM 版本上误伤。
-     */
-    private static boolean matches(Method m) {
+    private static boolean matchesHelper(Method m) {
         Class<?>[] p = m.getParameterTypes();
         if (p.length != 6) {
             return false;
@@ -141,7 +160,6 @@ public final class CenterHook {
         Config cfg = PrefsClient.get(ctx);
         Rect bounds = new Rect();
         if (!cfg.enabled) {
-            // 关闭时完全复刻原行为，保证“开关关掉 = 和系统一模一样”
             paint.getTextBounds(text, 0, text.length(), bounds);
             return height / 2f - baseline - (bounds.top + bounds.bottom) / 2f;
         }
@@ -152,13 +170,108 @@ public final class CenterHook {
                 + cfg.offsetDp * density;
         float rounded = Math.round(dy);
         if (sFirstDrawLogged.compareAndSet(false, true)) {
-            XposedBridge.log(ModuleEntry.TAG + ": first draw h=" + height
+            XposedBridge.log(ModuleEntry.TAG + ": [textview] h=" + height
                     + " baseline=" + baseline + " refTop=" + bounds.top
                     + " refBottom=" + bounds.bottom + " text=" + text
                     + " offsetDp=" + cfg.offsetDp + " dy=" + rounded);
         }
         return rounded;
     }
+
+    // ------------------------------------------------------------ 路径 2：BatteryTintView 自绘
+
+    private void hookBatteryTintView(ClassLoader cl) {
+        Class<?> clazz = XposedHelpers.findClassIfExists(BATTERY_TINT_VIEW, cl);
+        if (clazz == null) {
+            XposedBridge.log(ModuleEntry.TAG + ": BatteryTintView not found (path 2 skipped)");
+            return;
+        }
+        Method onDraw;
+        try {
+            onDraw = clazz.getDeclaredMethod("onDraw", Canvas.class);
+        } catch (NoSuchMethodException e) {
+            XposedBridge.log(ModuleEntry.TAG + ": BatteryTintView.onDraw not found");
+            return;
+        }
+        XposedBridge.hookMethod(onDraw, new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    Object percent = field(param.thisObject, "mInsidePercent");
+                    if (percent instanceof TextView) {
+                        IN_BATTERY_TEXT_DRAW.set(Boolean.TRUE);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(t);
+                }
+            }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                IN_BATTERY_TEXT_DRAW.remove();
+            }
+        });
+        XposedBridge.log(ModuleEntry.TAG + ": hooked " + BATTERY_TINT_VIEW + ".onDraw");
+    }
+
+    /**
+     * 全局 hook Paint.getTextBounds(String,...)：只在 BatteryTintView.onDraw 这一帧里、
+     * 且只对第一次调用生效，把垂直包围盒换成完整数字集合的固定包围盒。
+     */
+    private static synchronized void hookTextBounds() {
+        if (sPaintHooked) {
+            return;
+        }
+        try {
+            XposedHelpers.findAndHookMethod(Paint.class, "getTextBounds",
+                    String.class, int.class, int.class, Rect.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!Boolean.TRUE.equals(IN_BATTERY_TEXT_DRAW.get())) {
+                                return;
+                            }
+                            // 只处理本次电池文字测量，避免影响同一帧里的其它文本
+                            IN_BATTERY_TEXT_DRAW.remove();
+                            try {
+                                String text = (String) param.args[0];
+                                Rect out = (Rect) param.args[3];
+                                if (text == null || out == null || text.isEmpty() || sAppCtx == null) {
+                                    return;
+                                }
+                                Config cfg = PrefsClient.get(sAppCtx);
+                                if (!cfg.enabled) {
+                                    return;
+                                }
+                                String ref = CenterMath.referenceDigits(text);
+                                Rect fixed = new Rect();
+                                XposedBridge.invokeOriginalMethod(param.method, param.thisObject,
+                                        new Object[]{ref, 0, ref.length(), fixed});
+
+                                float density = sAppCtx.getResources().getDisplayMetrics().density;
+                                int offsetPx = Math.round(cfg.offsetDp * density);
+                                if (offsetPx != 0) {
+                                    fixed.offset(0, -offsetPx);
+                                }
+                                out.set(fixed);
+
+                                if (sFirstBatteryDrawLogged.compareAndSet(false, true)) {
+                                    XposedBridge.log(ModuleEntry.TAG + ": [batteryview] text=" + text
+                                            + " refTop=" + fixed.top + " refBottom=" + fixed.bottom
+                                            + " offsetDp=" + cfg.offsetDp);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log(t);
+                            }
+                        }
+                    });
+            sPaintHooked = true;
+            XposedBridge.log(ModuleEntry.TAG + ": hooked Paint.getTextBounds");
+        } catch (Throwable t) {
+            XposedBridge.log(ModuleEntry.TAG + ": Paint.getTextBounds hook failed: " + t);
+        }
+    }
+
+    // ------------------------------------------------------------ utils
 
     private static Object invoke(Object fn) {
         if (fn == null) {
@@ -174,5 +287,21 @@ public final class CenterHook {
 
     private static int asInt(Object o) {
         return o instanceof Number ? ((Number) o).intValue() : 0;
+    }
+
+    private static Object field(Object obj, String name) {
+        Class<?> c = obj.getClass();
+        while (c != null) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(obj);
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+        return null;
     }
 }
